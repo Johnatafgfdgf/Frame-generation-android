@@ -1,0 +1,72 @@
+name: Build Zalith FrameGen APK
+
+on:
+  push:
+    branches:
+      - zalith-framegen-build
+    paths:
+      - "build_tools/**"
+      - ".github/workflows/zalith-framegen.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout FrameGen build tools
+        uses: actions/checkout@v4
+        with:
+          ref: zalith-framegen-build
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;25.2.9519653"
+
+      - name: Clone Zalith Launcher 2.0.3
+        run: |
+          git clone --branch 2.0.3 --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/ZalithLauncher/ZalithLauncher2.git ZalithLauncher2
+          git -C ZalithLauncher2 status --short
+          git -C ZalithLauncher2 describe --tags --always
+
+      - name: Apply Frame Generation integration
+        run: |
+          python3 build_tools/apply_zalith_framegen.py
+          git -C ZalithLauncher2 diff --stat
+          grep -R "settings_tab_frame_generation" -n ZalithLauncher2/ZalithLauncher/src/main | head
+
+      - name: Build ARM64 debug APK
+        working-directory: ZalithLauncher2
+        env:
+          GRADLE_OPTS: -Dorg.gradle.daemon=false
+        run: |
+          chmod +x gradlew
+          ./gradlew --stacktrace ZalithLauncher:assembleDebug -Darch=arm64
+
+      - name: Show APK info
+        run: |
+          find ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug -type f -name "*.apk" -ls
+          sha256sum ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug/*.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zalith-FrameGen-2.0.3-fg1-arm64
+          path: ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
