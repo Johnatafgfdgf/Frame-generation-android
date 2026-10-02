@@ -29,18 +29,16 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android platform and NDK
         run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          command -v sdkmanager
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;25.2.9519653"
 
       - name: Clone Zalith Launcher 2.0.3
         run: |
-          git clone --branch 2.0.3 --depth 1 --recurse-submodules --shallow-submodules \
-            https://github.com/ZalithLauncher/ZalithLauncher2.git ZalithLauncher2
+          git clone --branch 2.0.3 --depth 1 --recurse-submodules --shallow-submodules             https://github.com/ZalithLauncher/ZalithLauncher2.git ZalithLauncher2
           git -C ZalithLauncher2 status --short
           git -C ZalithLauncher2 describe --tags --always
 
