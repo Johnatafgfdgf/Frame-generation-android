@@ -5,14 +5,17 @@ add_library(
         framegen_native
         SHARED
         native_probe.cpp
+        vulkan_presenter.cpp
 )
 
-find_library(log-lib log)
-find_library(vulkan-lib vulkan)
+find_library(log_lib log)
+find_library(android_lib android)
+find_library(vulkan_lib vulkan)
 
 target_link_libraries(
         framegen_native
         PRIVATE
-        ${log-lib}
-        ${vulkan-lib}
+        ${log_lib}
+        ${android_lib}
+        ${vulkan_lib}
 )
