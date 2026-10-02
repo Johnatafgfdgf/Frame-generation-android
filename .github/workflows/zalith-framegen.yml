@@ -44,6 +44,27 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;25.2.9519653"
 
+      - name: Fetch Win-FG Native sources
+        run: |
+          git clone https://github.com/The412Banner/win-fg.git win-fg
+          git -C win-fg checkout fbc69ed6c5bf16b824d0a29bd8b171675101f9dd
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git Vulkan-Headers
+          git -C win-fg rev-parse HEAD
+
+      - name: Build Win-FG native presenter ARM64
+        run: |
+          NDK="$ANDROID_HOME/ndk/25.2.9519653"
+          cmake -S build_tools/fg3 -B build_tools/fg3-build \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWINFG_SRC="$GITHUB_WORKSPACE/win-fg/src" \
+            -DVULKAN_INCLUDE="$GITHUB_WORKSPACE/Vulkan-Headers/include"
+          cmake --build build_tools/fg3-build --config Release --parallel 2
+          file build_tools/fg3-build/libzalith_winfg.so
+          readelf -d build_tools/fg3-build/libzalith_winfg.so | grep NEEDED || true
+
       - name: Clone Zalith Launcher 2.0.3
         run: |
           git clone --branch 2.0.3 --depth 1 --recurse-submodules --shallow-submodules             https://github.com/ZalithLauncher/ZalithLauncher2.git ZalithLauncher2
@@ -54,6 +75,11 @@ jobs:
         run: |
           python3 build_tools/apply_zalith_framegen.py
           python3 build_tools/apply_zalith_framegen_fg2.py
+          python3 build_tools/apply_zalith_framegen_fg3.py
+          cp build_tools/fg3-build/libzalith_winfg.so ZalithLauncher2/ZalithLauncher/src/main/jniLibs/arm64-v8a/libzalith_winfg.so
+          mkdir -p ZalithLauncher2/ZalithLauncher/src/main/assets/win-fg
+          cp win-fg/LICENSE ZalithLauncher2/ZalithLauncher/src/main/assets/win-fg/LICENSE
+          cp win-fg/NOTICE_FIDELITYFX_OPTICALFLOW.md ZalithLauncher2/ZalithLauncher/src/main/assets/win-fg/NOTICE_FIDELITYFX_OPTICALFLOW.md
           git -C ZalithLauncher2 diff --stat
           grep -R "settings_tab_frame_generation" -n ZalithLauncher2/ZalithLauncher/src/main | head
 
@@ -69,11 +95,14 @@ jobs:
         run: |
           find ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug -type f -name "*.apk" -ls
           sha256sum ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug/*.apk
+          APK="$(find ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug -type f -name '*.apk' | head -n1)"
+          unzip -l "$APK" | grep 'lib/arm64-v8a/libzalith_winfg.so'
+          unzip -p "$APK" lib/arm64-v8a/libzalith_winfg.so | strings | grep -m1 'Win-FG Native Vulkan Optical Flow'
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Zalith-FrameGen-2.0.3-fg2-arm64
+          name: Zalith-FrameGen-2.0.3-fg3-winfg-arm64
           path: ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
