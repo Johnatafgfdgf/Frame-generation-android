@@ -624,9 +624,7 @@ public final class MainActivity extends Activity
                 backendStatus.setText(status);
             } else {
                 backendStatus.setText(
-                        "DLL válida. Toque em "
-                        + "\\"Preparar / validar LSFG\\\" "
-                        + "para extrair os shaders e testar a GPU.");
+                        "DLL válida. Toque em Preparar / validar LSFG para extrair os shaders e testar a GPU.");
             }
         } catch (Throwable t) {
             losslessBackendPrepared = false;
