@@ -21,6 +21,7 @@ add_library(
         vulkan_presenter.cpp
         vulkan_interceptor.cpp
         frame_bridge.cpp
+        guest_frame_bridge.cpp
 )
 
 target_compile_definitions(
