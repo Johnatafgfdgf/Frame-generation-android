@@ -11,12 +11,15 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CompoundButton;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
+
+import java.io.File;
 
 public final class MainActivity extends Activity
         implements SurfaceHolder.Callback {
@@ -25,6 +28,7 @@ public final class MainActivity extends Activity
 
     static {
         System.loadLibrary("framegen_native");
+        System.loadLibrary("lossless_backend");
     }
 
     private static native String nativeProbeVulkan();
@@ -43,6 +47,13 @@ public final class MainActivity extends Activity
             android.view.Surface surface,
             float phase);
 
+    private static native String nativePrepareLosslessBackend(
+            String dllPath,
+            int multiplier,
+            boolean performance);
+    private static native String nativeGetLosslessBackendStatus();
+    private static native void nativeReleaseLosslessBackend();
+
     private TextView runtimeStatus;
     private TextView losslessStatus;
     private TextView backendStatus;
@@ -53,6 +64,7 @@ public final class MainActivity extends Activity
     private ScrollView frameGenPage;
 
     private Switch frameGenerationSwitch;
+    private Switch performanceModeSwitch;
     private Spinner multiplierSpinner;
 
     private float phase = 0.0f;
@@ -61,6 +73,8 @@ public final class MainActivity extends Activity
     private boolean presenterReady = false;
     private boolean guestSurfaceReady = false;
     private boolean guestTestLoaded = false;
+    private boolean losslessBackendPrepared = false;
+    private boolean frameGenerationRequested = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -81,7 +95,7 @@ public final class MainActivity extends Activity
 
         TextView subtitle = new TextView(this);
         subtitle.setText(
-                "Vulkan guest interception + GPU frame bridge");
+                "Guest Vulkan interception + native LSFG");
         subtitle.setTextSize(12f);
 
         LinearLayout tabs = new LinearLayout(this);
@@ -294,8 +308,9 @@ public final class MainActivity extends Activity
         TextView explanation = new TextView(this);
         explanation.setText(
                 "Adicione sua Lossless.dll. "
-                + "O arquivo fica somente no armazenamento privado do app. "
-                + "A DLL é validada antes de ser aceita.");
+                + "Ela fica no armazenamento privado do app e é usada "
+                + "somente como fonte dos shaders LSFG. "
+                + "O Android não executa a DLL Windows.");
         explanation.setTextSize(13f);
         explanation.setPadding(0, pad / 2, 0, pad);
 
@@ -312,6 +327,10 @@ public final class MainActivity extends Activity
         Button removeDll = new Button(this);
         removeDll.setText("Remover DLL");
         removeDll.setOnClickListener(v -> {
+            nativeReleaseLosslessBackend();
+            losslessBackendPrepared = false;
+            frameGenerationRequested = false;
+
             boolean removed =
                     LosslessDllManager.remove(this);
 
@@ -338,7 +357,11 @@ public final class MainActivity extends Activity
         String[] multipliers = {
                 "2x",
                 "3x",
-                "4x"
+                "4x",
+                "5x",
+                "6x",
+                "7x",
+                "8x"
         };
 
         ArrayAdapter<String> adapter =
@@ -350,30 +373,41 @@ public final class MainActivity extends Activity
                 android.R.layout.simple_spinner_dropdown_item);
         multiplierSpinner.setAdapter(adapter);
 
+        performanceModeSwitch = new Switch(this);
+        performanceModeSwitch.setText(
+                "Performance mode (LSFG 3.1P)");
+
+        Button prepareBackend = new Button(this);
+        prepareBackend.setText("Preparar / validar LSFG");
+        prepareBackend.setOnClickListener(
+                v -> prepareLosslessBackend());
+
         frameGenerationSwitch = new Switch(this);
         frameGenerationSwitch.setText(
-                "Ativar backend Lossless.dll");
+                "Usar frame generation no pipeline");
         frameGenerationSwitch.setEnabled(false);
+        frameGenerationSwitch.setOnCheckedChangeListener(
+                this::onFrameGenerationToggle);
 
         backendStatus = new TextView(this);
         backendStatus.setTextSize(12f);
         backendStatus.setPadding(0, pad / 2, 0, pad);
 
         TextView architectureTitle = new TextView(this);
-        architectureTitle.setText("Estado da integração");
+        architectureTitle.setText("Pipeline");
         architectureTitle.setTextSize(18f);
         architectureTitle.setPadding(0, pad, 0, pad / 2);
 
         TextView architecture = new TextView(this);
         architecture.setText(
-                "Pipeline planejado:\n"
-                + "Guest VkImage → GPU bridge → backend de frame generation "
-                + "→ compositor Vulkan → tela.\n\n"
-                + "A Lossless.dll enviada é uma DLL Windows x86-64. "
-                + "Ela depende de DXGI/D3D11/Win32, então não pode ser "
-                + "carregada diretamente por dlopen() no Android ARM64. "
-                + "O próximo backend necessário é um runtime PE/x86-64 "
-                + "com tradução das chamadas gráficas para o nosso bridge.");
+                "Guest VkImage\n"
+                + "  ↓ interceptor\n"
+                + "AHardwareBuffer input A/B\n"
+                + "  ↓ LSFG 3.1 / 3.1P Vulkan\n"
+                + "AHardwareBuffer generated frames\n"
+                + "  ↓ compositor Vulkan\n"
+                + "Display\n\n"
+                + "Sem MediaProjection no caminho planejado.");
         architecture.setTextSize(12f);
 
         content.addView(sectionTitle);
@@ -384,6 +418,8 @@ public final class MainActivity extends Activity
         content.addView(settingsTitle);
         content.addView(multiplierLabel);
         content.addView(multiplierSpinner);
+        content.addView(performanceModeSwitch);
+        content.addView(prepareBackend);
         content.addView(frameGenerationSwitch);
         content.addView(backendStatus);
 
@@ -392,6 +428,32 @@ public final class MainActivity extends Activity
 
         scroll.addView(content);
         return scroll;
+    }
+
+    private void onFrameGenerationToggle(
+            CompoundButton button,
+            boolean checked) {
+        if (!losslessBackendPrepared) {
+            if (checked) {
+                button.setChecked(false);
+            }
+            frameGenerationRequested = false;
+            return;
+        }
+
+        frameGenerationRequested = checked;
+
+        if (checked) {
+            backendStatus.setText(
+                    nativeGetLosslessBackendStatus()
+                    + "\nFrame generation: ARMADO. "
+                    + "O M3 agora deve conectar os AHardwareBuffers "
+                    + "do guest a este backend.");
+        } else {
+            backendStatus.setText(
+                    nativeGetLosslessBackendStatus()
+                    + "\nFrame generation: desativado pelo usuário.");
+        }
     }
 
     private LinearLayout horizontalRow() {
@@ -448,17 +510,75 @@ public final class MainActivity extends Activity
         }
 
         try {
+            nativeReleaseLosslessBackend();
+            losslessBackendPrepared = false;
+            frameGenerationRequested = false;
+
             LosslessDllManager.Info info =
                     LosslessDllManager.importFromUri(
                             this,
                             uri);
-            losslessStatus.setText(info.describe());
+
+            losslessStatus.setText(
+                    info.describe());
+
+            prepareLosslessBackend();
         } catch (Throwable t) {
             losslessStatus.setText(
-                    "Falha ao adicionar DLL: " + t.getMessage());
+                    "Falha ao adicionar DLL: "
+                    + t.getMessage());
+            refreshLosslessStatus();
+        }
+    }
+
+    private void prepareLosslessBackend() {
+        LosslessDllManager.Info info =
+                LosslessDllManager.inspect(this);
+
+        if (!info.installed ||
+            !info.validPe ||
+            !info.x64) {
+            losslessBackendPrepared = false;
+            frameGenerationSwitch.setEnabled(false);
+            frameGenerationSwitch.setChecked(false);
+            backendStatus.setText(
+                    "Adicione uma Lossless.dll x86-64 válida primeiro.");
+            return;
         }
 
-        refreshLosslessStatus();
+        File dll =
+                LosslessDllManager.getDllFile(this);
+
+        int multiplier =
+                multiplierSpinner.getSelectedItemPosition() + 2;
+
+        boolean performance =
+                performanceModeSwitch.isChecked();
+
+        try {
+            String result =
+                    nativePrepareLosslessBackend(
+                            dll.getAbsolutePath(),
+                            multiplier,
+                            performance);
+
+            losslessBackendPrepared =
+                    result.startsWith(
+                            "LSFG backend ready");
+
+            frameGenerationSwitch.setChecked(false);
+            frameGenerationSwitch.setEnabled(
+                    losslessBackendPrepared);
+
+            backendStatus.setText(result);
+        } catch (Throwable t) {
+            losslessBackendPrepared = false;
+            frameGenerationSwitch.setChecked(false);
+            frameGenerationSwitch.setEnabled(false);
+
+            backendStatus.setText(
+                    "Falha ao preparar LSFG: " + t);
+        }
     }
 
     private void refreshLosslessStatus() {
@@ -471,26 +591,48 @@ public final class MainActivity extends Activity
         LosslessDllManager.Info info =
                 LosslessDllManager.inspect(this);
 
-        losslessStatus.setText(info.describe());
+        losslessStatus.setText(
+                info.describe());
 
-        boolean dllReady =
-                info.installed &&
-                info.validPe &&
-                info.x64;
+        if (!info.installed ||
+            !info.validPe ||
+            !info.x64) {
+            losslessBackendPrepared = false;
+            frameGenerationRequested = false;
 
-        frameGenerationSwitch.setChecked(false);
-        frameGenerationSwitch.setEnabled(false);
+            frameGenerationSwitch.setChecked(false);
+            frameGenerationSwitch.setEnabled(false);
 
-        if (dllReady) {
-            backendStatus.setText(
-                    "DLL válida e armazenada. "
-                    + "Backend: aguardando runtime Windows x86-64/PE "
-                    + "e ponte DXGI → Vulkan. "
-                    + "Frame generation ainda não é marcado como ativo.");
-        } else {
             backendStatus.setText(
                     "Backend indisponível até uma Lossless.dll "
-                    + "Windows x86-64 válida ser adicionada.");
+                    + "x86-64 válida ser adicionada.");
+            return;
+        }
+
+        try {
+            String status =
+                    nativeGetLosslessBackendStatus();
+
+            losslessBackendPrepared =
+                    status.startsWith(
+                            "LSFG backend ready");
+
+            frameGenerationSwitch.setEnabled(
+                    losslessBackendPrepared);
+
+            if (losslessBackendPrepared) {
+                backendStatus.setText(status);
+            } else {
+                backendStatus.setText(
+                        "DLL válida. Toque em "
+                        + ""Preparar / validar LSFG" "
+                        + "para extrair os shaders e testar a GPU.");
+            }
+        } catch (Throwable t) {
+            losslessBackendPrepared = false;
+            frameGenerationSwitch.setEnabled(false);
+            backendStatus.setText(
+                    "Backend nativo indisponível: " + t);
         }
     }
 
@@ -625,7 +767,10 @@ public final class MainActivity extends Activity
     @Override
     protected void onDestroy() {
         presenterReady = false;
+
         nativeDestroyPresenter();
+        nativeReleaseLosslessBackend();
+
         super.onDestroy();
     }
 
