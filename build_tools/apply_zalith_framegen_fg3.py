@@ -64,6 +64,8 @@ assets.mkdir(parents=True, exist_ok=True)
 # Replace fg2 native blend/presenter bridge with the real Win-FG Native bridge.
 p = "ZalithLauncher/src/main/jni/ctxbridges/osm_bridge.c"
 s = read(p)
+if "#include <dlfcn.h>" not in s:
+    s = s.replace("#include <malloc.h>\n", "#include <malloc.h>\n#include <dlfcn.h>\n")
 
 start = s.index("static pthread_mutex_t fg_mutex")
 end = s.index("\nvoid osm_setup_window()", start)
