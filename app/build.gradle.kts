@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "dev.framegen.android"
-    compileSdk = 37
+    compileSdk = 35
     ndkVersion = "30.0.16248370"
 
     defaultConfig {
@@ -31,7 +31,7 @@ android {
 
     packaging {
         jniLibs {
-            pickFirsts += setOf("**/libbytehook.so")
+            pickFirsts += setOf("**/libbytehook.so", "**/libshadowhook.so")
         }
     }
 
@@ -54,5 +54,5 @@ android {
 }
 
 dependencies {
-    implementation("com.bytedance:bytehook:1.1.2")
+    implementation("com.bytedance:bytehook:1.1.1")
 }
