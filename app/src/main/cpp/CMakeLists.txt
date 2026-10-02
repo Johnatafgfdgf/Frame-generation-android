@@ -13,6 +13,7 @@ add_library(
         native_probe.cpp
         vulkan_presenter.cpp
         vulkan_interceptor.cpp
+        frame_bridge.cpp
 )
 
 target_compile_definitions(
