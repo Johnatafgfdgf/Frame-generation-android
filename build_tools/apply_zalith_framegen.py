@@ -328,7 +328,7 @@ for rel, block in [
 # 7) Native in-process frame interpolator in the Zink/Turnip OSMesa presentation path.
 p = "ZalithLauncher/src/main/jni/ctxbridges/osm_bridge.c"
 s = read(p)
-s = s.replace("#include <stdlib.h>\n", "#include <stdlib.h>\n#include <stdint.h>\n#include <time.h>\n#include <math.h>\n")
+s = s.replace("#include <malloc.h>\n", "#include <malloc.h>\n#include <stdlib.h>\n#include <stdint.h>\n#include <strings.h>\n#include <unistd.h>\n")
 if '#include "renderer_config.h"' not in s:
     s = s.replace('#include "osm_bridge.h"\n', '#include "osm_bridge.h"\n#include "renderer_config.h"\n')
 
@@ -492,11 +492,7 @@ static void fg_optional_pacing_sleep(void) {
     if (ns > 4000000L) ns = 4000000L;
     if (ns < 250000L) ns = 250000L;
 
-    struct timespec ts = {
-        .tv_sec = 0,
-        .tv_nsec = ns
-    };
-    nanosleep(&ts, NULL);
+    usleep((unsigned int)(ns / 1000L));
 }
 
 static bool fg_post_and_lock_next(osm_render_window_t *bundle) {
