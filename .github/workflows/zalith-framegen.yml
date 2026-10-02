@@ -53,6 +53,7 @@ jobs:
       - name: Apply Frame Generation integration
         run: |
           python3 build_tools/apply_zalith_framegen.py
+          python3 build_tools/apply_zalith_framegen_fg2.py
           git -C ZalithLauncher2 diff --stat
           grep -R "settings_tab_frame_generation" -n ZalithLauncher2/ZalithLauncher/src/main | head
 
@@ -72,7 +73,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Zalith-FrameGen-2.0.3-fg1-arm64
+          name: Zalith-FrameGen-2.0.3-fg2-arm64
           path: ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
