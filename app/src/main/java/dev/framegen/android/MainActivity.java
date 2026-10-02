@@ -20,16 +20,20 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
     private static native String nativeDrawFrame(float phase);
     private static native void nativeDestroyPresenter();
 
+    private static native String nativeInstallVulkanHooks();
+    private static native String nativeGetVulkanHookStats();
+    private static native String nativeRunGuestVulkanTest();
+
     private TextView status;
-    private SurfaceView surfaceView;
     private float phase = 0.0f;
     private boolean presenterReady = false;
+    private boolean guestTestLoaded = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        int pad = (int) (12 * getResources().getDisplayMetrics().density);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -42,13 +46,13 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
 
         TextView title = new TextView(this);
         title.setText("Frame Generation Android");
-        title.setTextSize(23f);
+        title.setTextSize(22f);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("M0.1 - host-owned Vulkan compositor");
-        subtitle.setTextSize(14f);
+        subtitle.setText("M0.1 compositor + M1A guest Vulkan interception");
+        subtitle.setTextSize(13f);
 
-        surfaceView = new SurfaceView(this);
+        SurfaceView surfaceView = new SurfaceView(this);
         surfaceView.getHolder().addCallback(this);
         LinearLayout.LayoutParams surfaceParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -61,15 +65,15 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
 
         status = new TextView(this);
         status.setText("Creating Vulkan output surface...");
-        status.setTextSize(13f);
+        status.setTextSize(12f);
         status.setPadding(0, 0, 0, pad);
 
-        LinearLayout buttons = new LinearLayout(this);
-        buttons.setOrientation(LinearLayout.HORIZONTAL);
-        buttons.setGravity(Gravity.CENTER);
+        LinearLayout row1 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        row1.setGravity(Gravity.CENTER);
 
         Button probe = new Button(this);
-        probe.setText("Probe GPU");
+        probe.setText("Probe");
         probe.setOnClickListener(v -> {
             try {
                 status.setText(nativeProbeVulkan());
@@ -79,10 +83,10 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         });
 
         Button render = new Button(this);
-        render.setText("Present frame");
+        render.setText("Present");
         render.setOnClickListener(v -> {
             if (!presenterReady) {
-                status.setText("The Vulkan compositor is not ready yet.");
+                status.setText("The Vulkan compositor is not ready.");
                 return;
             }
 
@@ -98,16 +102,38 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
             }
         });
 
-        buttons.addView(probe);
-        buttons.addView(render);
+        row1.addView(probe);
+        row1.addView(render);
+
+        Button hookTest = new Button(this);
+        hookTest.setText("Run M1A Vulkan hook test");
+        hookTest.setOnClickListener(v -> runHookTest());
 
         root.addView(title);
         root.addView(subtitle);
         root.addView(surfaceView);
         root.addView(status);
-        root.addView(buttons);
+        root.addView(row1);
+        root.addView(hookTest);
 
         setContentView(root);
+    }
+
+    private void runHookTest() {
+        try {
+            String armed = nativeInstallVulkanHooks();
+
+            if (!guestTestLoaded) {
+                System.loadLibrary("framegen_guest_test");
+                guestTestLoaded = true;
+            }
+
+            String guest = nativeRunGuestVulkanTest();
+            String stats = nativeGetVulkanHookStats();
+            status.setText(armed + "\n\n" + guest + "\n\n" + stats);
+        } catch (Throwable t) {
+            status.setText("M1A hook test failed: " + t);
+        }
     }
 
     @Override
