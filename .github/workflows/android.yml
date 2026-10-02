@@ -27,7 +27,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "9.6.0"
+          gradle-version: "8.9"
 
       - name: Install Android native toolchain
         shell: bash
@@ -35,7 +35,7 @@ jobs:
           set -euo pipefail
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER"             "platforms;android-37"             "build-tools;36.0.0"             "ndk;30.0.16248370"             "cmake;3.22.1"
+          "$SDKMANAGER"             "platforms;android-35"             "build-tools;35.0.0"             "ndk;30.0.16248370"             "cmake;3.22.1"
 
       - name: Show pinned LSFG revision
         run: |
