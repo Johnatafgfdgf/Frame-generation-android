@@ -7,6 +7,12 @@ on:
     paths:
       - "build_tools/**"
       - ".github/workflows/zalith-framegen.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "build_tools/**"
+      - ".github/workflows/zalith-framegen.yml"
   workflow_dispatch:
 
 permissions:
