@@ -15,6 +15,12 @@ add_library(
         vulkan_interceptor.cpp
 )
 
+target_compile_definitions(
+        framegen_native
+        PRIVATE
+        VK_USE_PLATFORM_ANDROID_KHR=1
+)
+
 target_link_libraries(
         framegen_native
         PRIVATE
@@ -28,6 +34,12 @@ add_library(
         framegen_guest_test
         SHARED
         guest_vulkan_test.cpp
+)
+
+target_compile_definitions(
+        framegen_guest_test
+        PRIVATE
+        VK_USE_PLATFORM_ANDROID_KHR=1
 )
 
 target_link_libraries(
