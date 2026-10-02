@@ -5,6 +5,7 @@ plugins {
 android {
     namespace = "dev.framegen.android"
     compileSdk = 35
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
         applicationId = "dev.framegen.android"
