@@ -11,7 +11,7 @@ android {
         minSdk = 29
         targetSdk = 35
         versionCode = 1
-        versionName = "0.0.1"
+        versionName = "0.0.2"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -21,6 +21,16 @@ android {
             cmake {
                 cppFlags += listOf("-std=c++20", "-Wall", "-Wextra")
             }
+        }
+    }
+
+    buildFeatures {
+        prefab = true
+    }
+
+    packaging {
+        jniLibs {
+            pickFirsts += setOf("**/libbytehook.so")
         }
     }
 
@@ -40,4 +50,8 @@ android {
             version = "3.22.1"
         }
     }
+}
+
+dependencies {
+    implementation("com.bytedance:bytehook:1.1.2")
 }
