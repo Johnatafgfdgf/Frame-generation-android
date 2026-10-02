@@ -225,19 +225,9 @@ private:
     }
 
     bool initVulkan() {
-        void* vulkanHandle = nullptr;
-        const char* ptr = std::getenv("VULKAN_PTR");
-        if (ptr && *ptr) {
-            uintptr_t raw = static_cast<uintptr_t>(std::strtoull(ptr, nullptr, 16));
-            vulkanHandle = reinterpret_cast<void*>(raw);
-            externalVulkanHandle_ = true;
-            ZFG_LOGI("Using Zalith Vulkan handle %p", vulkanHandle);
-        }
-        if (!vulkanHandle) {
-            vulkanHandle = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-            externalVulkanHandle_ = false;
-            ZFG_LOGI("Using Android system Vulkan handle %p", vulkanHandle);
-        }
+        void* vulkanHandle = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+        externalVulkanHandle_ = false;
+        ZFG_LOGI("Using Android Vulkan loader %p", vulkanHandle);
         if (!vulkanHandle) {
             ZFG_LOGE("dlopen Vulkan failed: %s", dlerror());
             return false;
