@@ -1,0 +1,372 @@
+static pthread_mutex_t fg_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fg_cond = PTHREAD_COND_INITIALIZER;
+static pthread_t fg_present_thread;
+static bool fg_thread_started = false;
+
+static uint8_t *fg_render = NULL;
+static uint8_t *fg_previous = NULL;
+static uint8_t *fg_current = NULL;
+static size_t fg_capacity = 0;
+static int fg_width = 0;
+static int fg_height = 0;
+static int fg_stride = 0;
+static bool fg_have_current = false;
+static bool fg_have_previous = false;
+static uint64_t fg_sequence = 0;
+static osm_render_window_t *fg_bundle = NULL;
+
+static uint64_t fg_real_total = 0;
+static uint64_t fg_generated_total = 0;
+static uint64_t fg_presented_total = 0;
+
+static bool fg_env_bool(const char *name, bool fallback) {
+    const char *value = getenv(name);
+    if (value == NULL) return fallback;
+    return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0;
+}
+
+static int fg_env_int(const char *name, int fallback, int minimum, int maximum) {
+    const char *value = getenv(name);
+    if (value == NULL) return fallback;
+    long parsed = strtol(value, NULL, 10);
+    if (parsed < minimum) parsed = minimum;
+    if (parsed > maximum) parsed = maximum;
+    return (int)parsed;
+}
+
+static const char *fg_env_profile(void) {
+    const char *profile = getenv("POJAV_FRAMEGEN_PROFILE");
+    return profile == NULL ? "balanced" : profile;
+}
+
+static bool fg_enabled(void) {
+    return pojav_environ->config_renderer == RENDERER_VK_ZINK &&
+           fg_env_bool("POJAV_FRAMEGEN_ENABLED", false);
+}
+
+static void fg_reset_history_locked(void) {
+    fg_have_current = false;
+    fg_have_previous = false;
+    fg_sequence++;
+    pthread_cond_signal(&fg_cond);
+}
+
+static bool fg_realloc_locked(size_t bytes) {
+    if (bytes <= fg_capacity && fg_render && fg_previous && fg_current) return true;
+
+    uint8_t *new_render = (uint8_t *)malloc(bytes);
+    uint8_t *new_previous = (uint8_t *)malloc(bytes);
+    uint8_t *new_current = (uint8_t *)malloc(bytes);
+    if (!new_render || !new_previous || !new_current) {
+        free(new_render);
+        free(new_previous);
+        free(new_current);
+        return false;
+    }
+
+    free(fg_render);
+    free(fg_previous);
+    free(fg_current);
+    fg_render = new_render;
+    fg_previous = new_previous;
+    fg_current = new_current;
+    fg_capacity = bytes;
+    fg_reset_history_locked();
+    return true;
+}
+
+static bool fg_prepare_game_buffer(osm_render_window_t *bundle) {
+    if (bundle == NULL || bundle->nativeSurface == NULL) return false;
+
+    int width = ANativeWindow_getWidth(bundle->nativeSurface);
+    int height = ANativeWindow_getHeight(bundle->nativeSurface);
+    if (width <= 0 || height <= 0) return false;
+
+    int stride = width;
+    size_t bytes = (size_t)stride * (size_t)height * 4u;
+
+    pthread_mutex_lock(&fg_mutex);
+    bool ok = fg_realloc_locked(bytes);
+    if (ok && (width != fg_width || height != fg_height || stride != fg_stride)) {
+        fg_width = width;
+        fg_height = height;
+        fg_stride = stride;
+        fg_reset_history_locked();
+    }
+    pthread_mutex_unlock(&fg_mutex);
+    if (!ok) return false;
+
+    ANativeWindow_setBuffersGeometry(bundle->nativeSurface, width, height, WINDOW_FORMAT_RGBX_8888);
+
+    bundle->buffer.bits = fg_render;
+    bundle->buffer.width = width;
+    bundle->buffer.height = height;
+    bundle->buffer.stride = stride;
+    bundle->buffer.format = WINDOW_FORMAT_RGBX_8888;
+    return true;
+}
+
+static double fg_frame_difference(
+    const uint8_t *a,
+    const uint8_t *b,
+    int width,
+    int height,
+    int stride
+) {
+    uint64_t difference = 0;
+    uint64_t samples = 0;
+    for (int y = 0; y < height; y += 6) {
+        const uint8_t *row_a = a + ((size_t)y * (size_t)stride * 4u);
+        const uint8_t *row_b = b + ((size_t)y * (size_t)stride * 4u);
+        for (int x = 0; x < width; x += 12) {
+            int i = x * 4;
+            difference += (uint64_t)abs((int)row_a[i + 0] - (int)row_b[i + 0]);
+            difference += (uint64_t)abs((int)row_a[i + 1] - (int)row_b[i + 1]);
+            difference += (uint64_t)abs((int)row_a[i + 2] - (int)row_b[i + 2]);
+            samples += 3;
+        }
+    }
+    if (samples == 0) return 0.0;
+    return (double)difference / ((double)samples * 255.0);
+}
+
+static void fg_blend_alpha(
+    uint8_t *dst,
+    const uint8_t *previous,
+    const uint8_t *current,
+    int width,
+    int height,
+    int stride,
+    float alpha,
+    const char *profile
+) {
+    int artifact_threshold = 255;
+    if (strcmp(profile, "quality") == 0) artifact_threshold = 48;
+    else if (strcmp(profile, "balanced") == 0) artifact_threshold = 96;
+
+    int b_weight = (int)(alpha * 256.0f);
+    if (b_weight < 0) b_weight = 0;
+    if (b_weight > 256) b_weight = 256;
+    int a_weight = 256 - b_weight;
+
+    for (int y = 0; y < height; ++y) {
+        uint8_t *out = dst + ((size_t)y * (size_t)stride * 4u);
+        const uint8_t *a = previous + ((size_t)y * (size_t)stride * 4u);
+        const uint8_t *b = current + ((size_t)y * (size_t)stride * 4u);
+        for (int x = 0; x < width; ++x) {
+            int i = x * 4;
+            int d0 = abs((int)a[i + 0] - (int)b[i + 0]);
+            int d1 = abs((int)a[i + 1] - (int)b[i + 1]);
+            int d2 = abs((int)a[i + 2] - (int)b[i + 2]);
+            int max_delta = d0 > d1 ? (d0 > d2 ? d0 : d2) : (d1 > d2 ? d1 : d2);
+
+            if (artifact_threshold < 255 && max_delta > artifact_threshold) {
+                const uint8_t *chosen = alpha >= 0.5f ? b : a;
+                out[i + 0] = chosen[i + 0];
+                out[i + 1] = chosen[i + 1];
+                out[i + 2] = chosen[i + 2];
+            } else {
+                out[i + 0] = (uint8_t)(((int)a[i + 0] * a_weight + (int)b[i + 0] * b_weight) >> 8);
+                out[i + 1] = (uint8_t)(((int)a[i + 1] * a_weight + (int)b[i + 1] * b_weight) >> 8);
+                out[i + 2] = (uint8_t)(((int)a[i + 2] * a_weight + (int)b[i + 2] * b_weight) >> 8);
+            }
+            out[i + 3] = b[i + 3];
+        }
+    }
+}
+
+static bool fg_post_frame(
+    ANativeWindow *window,
+    const uint8_t *src,
+    int width,
+    int height,
+    int stride
+) {
+    if (!window || !src) return false;
+
+    ANativeWindow_Buffer out;
+    if (ANativeWindow_lock(window, &out, NULL) != 0) return false;
+
+    int copy_width = width < out.width ? width : out.width;
+    int copy_height = height < out.height ? height : out.height;
+    for (int y = 0; y < copy_height; ++y) {
+        memcpy(
+            (uint8_t *)out.bits + ((size_t)y * (size_t)out.stride * 4u),
+            src + ((size_t)y * (size_t)stride * 4u),
+            (size_t)copy_width * 4u
+        );
+    }
+
+    if (ANativeWindow_unlockAndPost(window) != 0) return false;
+    __sync_fetch_and_add(&fg_presented_total, 1);
+    return true;
+}
+
+static void *fg_present_loop(void *unused) {
+    uint64_t seen_sequence = 0;
+    uint8_t *local_previous = NULL;
+    uint8_t *local_current = NULL;
+    uint8_t *local_output = NULL;
+    size_t local_capacity = 0;
+
+    for (;;) {
+        pthread_mutex_lock(&fg_mutex);
+        while (fg_sequence == seen_sequence) {
+            pthread_cond_wait(&fg_cond, &fg_mutex);
+        }
+
+        seen_sequence = fg_sequence;
+        bool have_current = fg_have_current;
+        bool have_previous = fg_have_previous;
+        int width = fg_width;
+        int height = fg_height;
+        int stride = fg_stride;
+        size_t bytes = (size_t)stride * (size_t)height * 4u;
+        osm_render_window_t *bundle = fg_bundle;
+
+        if (bytes > local_capacity) {
+            uint8_t *p = (uint8_t *)realloc(local_previous, bytes);
+            uint8_t *c = (uint8_t *)realloc(local_current, bytes);
+            uint8_t *o = (uint8_t *)realloc(local_output, bytes);
+            if (!p || !c || !o) {
+                if (p) local_previous = p;
+                if (c) local_current = c;
+                if (o) local_output = o;
+                pthread_mutex_unlock(&fg_mutex);
+                usleep(1000);
+                continue;
+            }
+            local_previous = p;
+            local_current = c;
+            local_output = o;
+            local_capacity = bytes;
+        }
+
+        if (have_current && bytes > 0) memcpy(local_current, fg_current, bytes);
+        if (have_previous && bytes > 0) memcpy(local_previous, fg_previous, bytes);
+
+        ANativeWindow *window = bundle ? bundle->nativeSurface : NULL;
+        if (window) ANativeWindow_acquire(window);
+        pthread_mutex_unlock(&fg_mutex);
+
+        if (!window || !have_current || !fg_enabled()) {
+            if (window) ANativeWindow_release(window);
+            continue;
+        }
+
+        int multiplier = fg_env_int("POJAV_FRAMEGEN_MULTIPLIER", 2, 2, 4);
+        int target_fps = fg_env_int("POJAV_FRAMEGEN_TARGET_FPS", 60, 30, 120);
+        unsigned int interval_us = (unsigned int)(1000000 / target_fps);
+        bool low_latency = fg_env_bool("POJAV_FRAMEGEN_LOW_LATENCY", true);
+        bool scene_protection = fg_env_bool("POJAV_FRAMEGEN_SCENE_PROTECTION", true);
+        const char *profile = fg_env_profile();
+
+        bool interpolate = have_previous;
+        if (interpolate) {
+            double diff = fg_frame_difference(local_previous, local_current, width, height, stride);
+            if (diff < 0.0025) interpolate = false;
+            if (scene_protection && diff > 0.24) interpolate = false;
+        }
+
+        if (interpolate) {
+            for (int step = 1; step < multiplier; ++step) {
+                float alpha = (float)step / (float)multiplier;
+                if (low_latency && multiplier == 2 && step == 1) alpha = 0.35f;
+
+                fg_blend_alpha(
+                    local_output,
+                    local_previous,
+                    local_current,
+                    width,
+                    height,
+                    stride,
+                    alpha,
+                    profile
+                );
+
+                if (fg_post_frame(window, local_output, width, height, stride)) {
+                    __sync_fetch_and_add(&fg_generated_total, 1);
+                }
+                usleep(interval_us);
+                if (!fg_enabled()) break;
+            }
+        }
+
+        if (fg_enabled()) {
+            fg_post_frame(window, local_current, width, height, stride);
+        }
+
+        ANativeWindow_release(window);
+    }
+    return NULL;
+}
+
+static void fg_start_presenter(void) {
+    if (fg_thread_started) return;
+    fg_thread_started = true;
+    pthread_create(&fg_present_thread, NULL, fg_present_loop, NULL);
+    pthread_detach(fg_present_thread);
+}
+
+void osm_swap_buffers() {
+    if(currentBundle->state == STATE_RENDERER_NEW_WINDOW) {
+        osm_swap_surfaces(currentBundle);
+        currentBundle->state = STATE_RENDERER_ALIVE;
+        pthread_mutex_lock(&fg_mutex);
+        fg_reset_history_locked();
+        pthread_mutex_unlock(&fg_mutex);
+    }
+
+    if (!fg_enabled()) {
+        if(currentBundle->nativeSurface != NULL && !currentBundle->disable_rendering)
+            if(ANativeWindow_lock(currentBundle->nativeSurface, &currentBundle->buffer, NULL) != 0)
+                osm_release_window();
+
+        osm_apply_current_ll();
+        glFinish_p();
+
+        if(currentBundle->nativeSurface != NULL && !currentBundle->disable_rendering)
+            if(ANativeWindow_unlockAndPost(currentBundle->nativeSurface) != 0)
+                osm_release_window();
+        return;
+    }
+
+    if (!fg_prepare_game_buffer(currentBundle)) return;
+
+    osm_apply_current_ll();
+    glFinish_p();
+    __sync_fetch_and_add(&fg_real_total, 1);
+
+    size_t bytes = (size_t)fg_stride * (size_t)fg_height * 4u;
+
+    pthread_mutex_lock(&fg_mutex);
+    if (fg_have_current) {
+        uint8_t *tmp = fg_previous;
+        fg_previous = fg_current;
+        fg_current = tmp;
+        fg_have_previous = true;
+    }
+    memcpy(fg_current, fg_render, bytes);
+    fg_have_current = true;
+    fg_bundle = currentBundle;
+    fg_sequence++;
+    pthread_cond_signal(&fg_cond);
+    pthread_mutex_unlock(&fg_mutex);
+
+    fg_start_presenter();
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_com_movtery_zalithlauncher_bridge_ZLBridge_getFrameGenStats(JNIEnv *env, jclass clazz) {
+    jlong values[4];
+    values[0] = fg_enabled() ? 1 : 0;
+    values[1] = (jlong)__sync_fetch_and_add(&fg_real_total, 0);
+    values[2] = (jlong)__sync_fetch_and_add(&fg_generated_total, 0);
+    values[3] = (jlong)__sync_fetch_and_add(&fg_presented_total, 0);
+
+    jlongArray result = (*env)->NewLongArray(env, 4);
+    if (result != NULL) {
+        (*env)->SetLongArrayRegion(env, result, 0, 4, values);
+    }
+    return result;
+}
