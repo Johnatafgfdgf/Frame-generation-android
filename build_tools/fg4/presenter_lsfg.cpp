@@ -227,7 +227,7 @@ private:
                 return false;
             }
             fg_ = std::make_unique<lsfg::Engine>();
-            if (!fg_->init(device_, physical_, cache, lsfg::kSpirv16)) {
+            if (!fg_->init(device_, physical_, cache, spirvTarget_)) {
                 ZFG_LOGE("LSFG Engine::init failed");
                 fg_.reset();
                 return false;
@@ -254,11 +254,23 @@ private:
     }
 
     bool initVulkan() {
-        void* vulkanHandle = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-        externalVulkanHandle_ = false;
-        ZFG_LOGI("Using Android Vulkan loader %p", vulkanHandle);
+        void* vulkanHandle = nullptr;
+        const char* pojavVulkanPtr = std::getenv("VULKAN_PTR");
+        if (pojavVulkanPtr && *pojavVulkanPtr) {
+            const uintptr_t raw = static_cast<uintptr_t>(
+                std::strtoull(pojavVulkanPtr, nullptr, 16)
+            );
+            vulkanHandle = reinterpret_cast<void*>(raw);
+            externalVulkanHandle_ = vulkanHandle != nullptr;
+            ZFG_LOGI("Using Zalith VULKAN_PTR loader %p", vulkanHandle);
+        }
         if (!vulkanHandle) {
-            ZFG_LOGE("dlopen Vulkan failed: %s", dlerror());
+            vulkanHandle = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+            externalVulkanHandle_ = false;
+            ZFG_LOGI("Using Android system Vulkan loader %p", vulkanHandle);
+        }
+        if (!vulkanHandle) {
+            ZFG_LOGE("Vulkan loader unavailable: %s", dlerror());
             return false;
         }
         vulkanHandle_ = vulkanHandle;
@@ -309,6 +321,15 @@ private:
         pDestroySurface_ = load_instance<PFN_vkDestroySurfaceKHR>(
             gipa_, instance_, "vkDestroySurfaceKHR");
         pCreateDevice_ = load_instance<PFN_vkCreateDevice>(gipa_, instance_, "vkCreateDevice");
+        pEnumerateDeviceExtensionProperties_ =
+            load_instance<PFN_vkEnumerateDeviceExtensionProperties>(
+                gipa_, instance_, "vkEnumerateDeviceExtensionProperties");
+        pGetPhysicalDeviceFeatures2_ =
+            load_instance<PFN_vkGetPhysicalDeviceFeatures2>(
+                gipa_, instance_, "vkGetPhysicalDeviceFeatures2");
+        pGetPhysicalDeviceFormatProperties_ =
+            load_instance<PFN_vkGetPhysicalDeviceFormatProperties>(
+                gipa_, instance_, "vkGetPhysicalDeviceFormatProperties");
 
         id_.GetInstanceProcAddr = gipa_;
         id_.DestroyInstance = load_instance<PFN_vkDestroyInstance>(gipa_, instance_, "vkDestroyInstance");
@@ -322,7 +343,9 @@ private:
         id_.GetPhysicalDeviceSurfaceCapabilitiesKHR = load_instance<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
             gipa_, instance_, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
 
-        if (!EnumeratePhysicalDevices || !GetQProps || !pCreateAndroidSurface_ || !pCreateDevice_) {
+        if (!EnumeratePhysicalDevices || !GetQProps || !pCreateAndroidSurface_ || !pCreateDevice_ ||
+            !pEnumerateDeviceExtensionProperties_ || !pGetPhysicalDeviceFeatures2_ ||
+            !pGetPhysicalDeviceFormatProperties_) {
             ZFG_LOGE("required instance functions missing");
             return false;
         }
@@ -353,17 +376,135 @@ private:
             return false;
         }
 
+        // LSFG's translated compute chain needs storage-image writes without a
+        // declared format plus the Vulkan memory model. Bannerlator's native LSFG
+        // also supports Vulkan 1.1/1.2 by lowering SPIR-V and enabling the matching
+        // KHR extensions. Do the same here instead of assuming Vulkan 1.3.
+        VkPhysicalDeviceProperties props{};
+        id_.GetPhysicalDeviceProperties(physical_, &props);
+
+        uint32_t extCount = 0;
+        pEnumerateDeviceExtensionProperties_(physical_, nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> extProps(extCount);
+        if (extCount) {
+            pEnumerateDeviceExtensionProperties_(
+                physical_, nullptr, &extCount, extProps.data()
+            );
+        }
+        auto hasExt = [&](const char* name) {
+            for (const auto& e : extProps) {
+                if (std::strcmp(e.extensionName, name) == 0) return true;
+            }
+            return false;
+        };
+
+        const bool api13 = props.apiVersion >= VK_API_VERSION_1_3;
+        const bool api12 = props.apiVersion >= VK_API_VERSION_1_2;
+
+        VkPhysicalDeviceFeatures2 offered{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        VkPhysicalDeviceVulkan12Features offered12{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+        };
+        VkPhysicalDeviceVulkanMemoryModelFeaturesKHR offeredMm{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES_KHR
+        };
+        offered.pNext = api12 ? static_cast<void*>(&offered12)
+                              : static_cast<void*>(&offeredMm);
+        pGetPhysicalDeviceFeatures2_(physical_, &offered);
+
+        if (!offered.features.shaderStorageImageWriteWithoutFormat ||
+            !offered.features.shaderStorageImageExtendedFormats) {
+            ZFG_LOGE("LSFG unsupported: required storage-image features missing");
+            return false;
+        }
+
+        std::vector<const char*> deviceExts;
+        deviceExts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+        if (api13) {
+            if (!offered12.vulkanMemoryModel) {
+                ZFG_LOGE("LSFG unsupported: Vulkan memory model missing");
+                return false;
+            }
+            spirvTarget_ = lsfg::kSpirv16;
+        } else if (api12) {
+            if (!offered12.vulkanMemoryModel) {
+                ZFG_LOGE("LSFG unsupported: Vulkan 1.2 memory model missing");
+                return false;
+            }
+            spirvTarget_ = lsfg::kSpirv15;
+        } else {
+            const bool compat =
+                hasExt(VK_KHR_SPIRV_1_4_EXTENSION_NAME) &&
+                hasExt(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME) &&
+                hasExt(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME) &&
+                offeredMm.vulkanMemoryModel;
+            if (!compat) {
+                ZFG_LOGE("LSFG unsupported: Vulkan 1.1 compatibility extensions/features missing");
+                return false;
+            }
+            deviceExts.push_back(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
+            deviceExts.push_back(VK_KHR_SPIRV_1_4_EXTENSION_NAME);
+            deviceExts.push_back(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME);
+            spirvTarget_ = lsfg::kSpirv14;
+        }
+
+        VkFormatProperties rgbaProps{};
+        pGetPhysicalDeviceFormatProperties_(
+            physical_, VK_FORMAT_R8G8B8A8_UNORM, &rgbaProps
+        );
+        const VkFormatFeatureFlags requiredFormat =
+            VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+            VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+            VK_FORMAT_FEATURE_BLIT_DST_BIT;
+        if ((rgbaProps.optimalTilingFeatures & requiredFormat) != requiredFormat) {
+            ZFG_LOGE("LSFG unsupported: RGBA8 optimal format lacks storage/sample/blit support");
+            return false;
+        }
+
+        VkPhysicalDeviceFeatures enabledFeatures{};
+        enabledFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+        enabledFeatures.shaderStorageImageExtendedFormats = VK_TRUE;
+
+        VkPhysicalDeviceVulkan12Features enabled12{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+        };
+        enabled12.vulkanMemoryModel = VK_TRUE;
+        enabled12.vulkanMemoryModelDeviceScope =
+            offered12.vulkanMemoryModelDeviceScope ? VK_TRUE : VK_FALSE;
+
+        VkPhysicalDeviceVulkanMemoryModelFeaturesKHR enabledMm{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES_KHR
+        };
+        enabledMm.vulkanMemoryModel = VK_TRUE;
+        enabledMm.vulkanMemoryModelDeviceScope =
+            offeredMm.vulkanMemoryModelDeviceScope ? VK_TRUE : VK_FALSE;
+
         float priority = 1.0f;
         VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
         qci.queueFamilyIndex = queueFamily_;
         qci.queueCount = 1;
         qci.pQueuePriorities = &priority;
-        const char* deviceExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+
         VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &qci;
-        dci.enabledExtensionCount = 1;
-        dci.ppEnabledExtensionNames = deviceExts;
+        dci.enabledExtensionCount = static_cast<uint32_t>(deviceExts.size());
+        dci.ppEnabledExtensionNames = deviceExts.data();
+        dci.pEnabledFeatures = &enabledFeatures;
+        dci.pNext = api12 ? static_cast<void*>(&enabled12)
+                          : static_cast<void*>(&enabledMm);
+
+        ZFG_LOGI(
+            "LSFG device %s Vulkan %u.%u.%u, SPIR-V target 0x%08x%s",
+            props.deviceName,
+            VK_VERSION_MAJOR(props.apiVersion),
+            VK_VERSION_MINOR(props.apiVersion),
+            VK_VERSION_PATCH(props.apiVersion),
+            spirvTarget_,
+            api13 ? "" : (api12 ? " (1.2 compat)" : " (1.1 KHR compat)")
+        );
 
         vr = pCreateDevice_(physical_, &dci, nullptr, &device_);
         if (vr != VK_SUCCESS) {
@@ -930,6 +1071,7 @@ private:
             if (diff > 0.30) allowGeneration = false;
         }
 
+        fg_->setPresentedRate(static_cast<float>(std::clamp(cfg.targetFps, 30, 120)));
         uint32_t genCount = fg_->plan(
             static_cast<uint32_t>(lsfg::kMaxGenerations),
             realSubmitted_.load(std::memory_order_relaxed)
@@ -1038,6 +1180,7 @@ private:
     VkQueue queue_ = VK_NULL_HANDLE;
     uint32_t queueFamily_ = 0;
     bool vkReady_ = false;
+    uint32_t spirvTarget_ = lsfg::kSpirv16;
 
     winfg::InstanceDispatch id_{};
     winfg::DeviceDispatch dd_{};
@@ -1045,6 +1188,9 @@ private:
     bool engineReady_ = false;
 
     PFN_vkCreateDevice pCreateDevice_ = nullptr;
+    PFN_vkEnumerateDeviceExtensionProperties pEnumerateDeviceExtensionProperties_ = nullptr;
+    PFN_vkGetPhysicalDeviceFeatures2 pGetPhysicalDeviceFeatures2_ = nullptr;
+    PFN_vkGetPhysicalDeviceFormatProperties pGetPhysicalDeviceFormatProperties_ = nullptr;
     PFN_vkCreateAndroidSurfaceKHR pCreateAndroidSurface_ = nullptr;
     PFN_vkDestroySurfaceKHR pDestroySurface_ = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR pGetSurfaceSupport_ = nullptr;
