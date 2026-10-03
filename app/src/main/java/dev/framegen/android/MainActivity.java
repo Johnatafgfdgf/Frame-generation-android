@@ -41,6 +41,9 @@ public final class MainActivity extends Activity
     private static native String nativeGetVulkanHookStats();
     private static native String nativeGetSwapchainRegistry();
     private static native String nativeProbeFrameBridge();
+    private static native void nativeSetGuestFrameBridgeEnabled(
+            boolean enabled);
+    private static native String nativeGetGuestFrameBridgeStatus();
 
     private static native String nativeRunGuestVulkanTest();
     private static native String nativeRunGuestSurfaceTest(
@@ -282,12 +285,34 @@ public final class MainActivity extends Activity
         row3.addView(bridgeProbe);
         row3.addView(registry);
 
+        LinearLayout row4 = horizontalRow();
+
+        Button m3Capture = new Button(this);
+        m3Capture.setText("M3 capture");
+        m3Capture.setOnClickListener(v -> runGuestBridgeTest());
+
+        Button m3Status = new Button(this);
+        m3Status.setText("M3 status");
+        m3Status.setOnClickListener(v -> {
+            try {
+                runtimeStatus.setText(
+                        nativeGetGuestFrameBridgeStatus());
+            } catch (Throwable t) {
+                runtimeStatus.setText(
+                        "Falha ao ler M3: " + t);
+            }
+        });
+
+        row4.addView(m3Capture);
+        row4.addView(m3Status);
+
         page.addView(hostSurfaceView);
         page.addView(guestSurfaceView);
         page.addView(runtimeStatus);
         page.addView(row1);
         page.addView(row2);
         page.addView(row3);
+        page.addView(row4);
 
         return page;
     }
@@ -327,6 +352,7 @@ public final class MainActivity extends Activity
         Button removeDll = new Button(this);
         removeDll.setText("Remover DLL");
         removeDll.setOnClickListener(v -> {
+            nativeSetGuestFrameBridgeEnabled(false);
             nativeReleaseLosslessBackend();
             losslessBackendPrepared = false;
             frameGenerationRequested = false;
@@ -438,17 +464,19 @@ public final class MainActivity extends Activity
                 button.setChecked(false);
             }
             frameGenerationRequested = false;
+            nativeSetGuestFrameBridgeEnabled(false);
             return;
         }
 
         frameGenerationRequested = checked;
+        nativeSetGuestFrameBridgeEnabled(checked);
 
         if (checked) {
             backendStatus.setText(
                     nativeGetLosslessBackendStatus()
-                    + "\nFrame generation: ARMADO. "
-                    + "O M3 agora deve conectar os AHardwareBuffers "
-                    + "do guest a este backend.");
+                    + "\nFrame generation: entrada GPU ARMADA. "
+                    + "O guest agora é copiado para AHardwareBuffer A/B. "
+                    + "A próxima etapa liga esses buffers ao LSFG e ao compositor.");
         } else {
             backendStatus.setText(
                     nativeGetLosslessBackendStatus()
@@ -510,6 +538,7 @@ public final class MainActivity extends Activity
         }
 
         try {
+            nativeSetGuestFrameBridgeEnabled(false);
             nativeReleaseLosslessBackend();
             losslessBackendPrepared = false;
             frameGenerationRequested = false;
@@ -599,6 +628,7 @@ public final class MainActivity extends Activity
             !info.x64) {
             losslessBackendPrepared = false;
             frameGenerationRequested = false;
+            nativeSetGuestFrameBridgeEnabled(false);
 
             frameGenerationSwitch.setChecked(false);
             frameGenerationSwitch.setEnabled(false);
@@ -716,6 +746,52 @@ public final class MainActivity extends Activity
         }
     }
 
+    private void runGuestBridgeTest() {
+        if (!guestSurfaceReady) {
+            runtimeStatus.setText(
+                    "Guest Surface ainda não está pronta.");
+            return;
+        }
+
+        try {
+            ensureGuestHookRuntime();
+
+            nativeSetGuestFrameBridgeEnabled(true);
+            guestPhase = nextPhase(guestPhase);
+
+            String result =
+                    nativeRunGuestSurfaceTest(
+                            guestSurfaceView
+                                    .getHolder()
+                                    .getSurface(),
+                            guestPhase);
+
+            String bridge =
+                    nativeGetGuestFrameBridgeStatus();
+
+            String registry =
+                    nativeGetSwapchainRegistry();
+
+            runtimeStatus.setText(
+                    result
+                    + "\n\n"
+                    + bridge
+                    + "\n\n"
+                    + registry);
+
+            if (!frameGenerationRequested) {
+                nativeSetGuestFrameBridgeEnabled(false);
+            }
+        } catch (Throwable t) {
+            if (!frameGenerationRequested) {
+                nativeSetGuestFrameBridgeEnabled(false);
+            }
+
+            runtimeStatus.setText(
+                    "M3 capture falhou: " + t);
+        }
+    }
+
     @Override
     public void surfaceCreated(
             SurfaceHolder holder) {
@@ -766,6 +842,7 @@ public final class MainActivity extends Activity
     protected void onDestroy() {
         presenterReady = false;
 
+        nativeSetGuestFrameBridgeEnabled(false);
         nativeDestroyPresenter();
         nativeReleaseLosslessBackend();
 
