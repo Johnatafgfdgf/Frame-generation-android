@@ -2,6 +2,7 @@
 #include <android/native_window.h>
 #include <dlfcn.h>
 #include <vulkan/vulkan.h>
+#include <jni.h>
 
 #include "lsfg_engine.h"
 #include "lsfg_dll.h"
@@ -1084,6 +1085,53 @@ private:
 Presenter gPresenter;
 
 } // namespace
+
+static std::string jstring_to_utf8(JNIEnv* env, jstring value) {
+    if (!value) return {};
+    const char* chars = env->GetStringUTFChars(value, nullptr);
+    if (!chars) return {};
+    std::string out(chars);
+    env->ReleaseStringUTFChars(value, chars);
+    return out;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_movtery_zalithlauncher_framegen_LsfgNativeBridge_nativeValidateDll(
+    JNIEnv* env, jclass, jstring path
+) {
+    const std::string p = jstring_to_utf8(env, path);
+    return p.empty() ? static_cast<jint>(lsfg::DllStatus::NotInstalled)
+                     : static_cast<jint>(lsfg::validateDll(p));
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_movtery_zalithlauncher_framegen_LsfgNativeBridge_nativeBuildCache(
+    JNIEnv* env, jclass, jstring dllPath, jstring cachePath, jboolean preferFp16
+) {
+    const std::string d = jstring_to_utf8(env, dllPath);
+    const std::string c = jstring_to_utf8(env, cachePath);
+    if (d.empty() || c.empty()) return static_cast<jint>(lsfg::DllStatus::NotInstalled);
+    return static_cast<jint>(lsfg::buildCache(d, c, preferFp16 == JNI_TRUE));
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_movtery_zalithlauncher_framegen_LsfgNativeBridge_nativeCacheMatches(
+    JNIEnv* env, jclass, jstring cachePath, jstring dllPath
+) {
+    const std::string c = jstring_to_utf8(env, cachePath);
+    const std::string d = jstring_to_utf8(env, dllPath);
+    bool matches = false;
+    if (c.empty() || d.empty()) return JNI_FALSE;
+    const auto st = lsfg::cacheMatchesSource(c, d, matches);
+    return (st == lsfg::DllStatus::Ok && matches) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_movtery_zalithlauncher_framegen_LsfgNativeBridge_nativeStatusName(
+    JNIEnv* env, jclass, jint status
+) {
+    return env->NewStringUTF(lsfg::statusName(static_cast<lsfg::DllStatus>(status)));
+}
 
 extern "C" int zlsfg_validate_dll(const char* dllPath) {
     if (!dllPath || !*dllPath) return static_cast<int>(lsfg::DllStatus::NotInstalled);
