@@ -596,7 +596,6 @@ private:
             window_ = nullptr;
         }
         surfaceW_ = surfaceH_ = 0;
-        history_ = 0;
         ready_.store(false, std::memory_order_release);
     }
 
