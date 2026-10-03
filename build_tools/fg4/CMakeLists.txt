@@ -10,6 +10,9 @@ endif()
 if(NOT DEFINED VULKAN_INCLUDE)
   message(FATAL_ERROR "VULKAN_INCLUDE is required")
 endif()
+if(NOT DEFINED WINFG_SRC)
+  message(FATAL_ERROR "WINFG_SRC is required")
+endif()
 
 add_subdirectory(${BANNER_CPP}/thirdparty/dxbc ${CMAKE_BINARY_DIR}/dxbc-build)
 
@@ -37,6 +40,7 @@ add_library(zalith_lsfg SHARED
 target_include_directories(zalith_lsfg PRIVATE
   ${LSFG_DIR}
   ${VULKAN_INCLUDE}
+  ${WINFG_SRC}
 )
 
 target_compile_definitions(zalith_lsfg PRIVATE
