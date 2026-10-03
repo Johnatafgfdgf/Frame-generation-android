@@ -101,7 +101,12 @@ jobs:
           sha256sum ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug/*.apk
           APK="$(find ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug -type f -name '*.apk' | head -n1)"
           unzip -l "$APK" | grep 'lib/arm64-v8a/libzalith_lsfg.so'
-          unzip -p "$APK" lib/arm64-v8a/libzalith_lsfg.so | strings | grep -m1 'LSFG Native from user Lossless.dll'
+          unzip -p "$APK" lib/arm64-v8a/libzalith_lsfg.so > /tmp/libzalith_lsfg.so
+          file /tmp/libzalith_lsfg.so
+          readelf -Ws /tmp/libzalith_lsfg.so | grep 'zlsfg_submit_frame'
+          readelf -Ws /tmp/libzalith_lsfg.so | grep 'zlsfg_build_cache'
+          readelf -Ws /tmp/libzalith_lsfg.so | grep 'Java_com_movtery_zalithlauncher_framegen_LsfgNativeBridge_nativeBuildCache'
+          strings /tmp/libzalith_lsfg.so | grep 'LSFG Native from user Lossless.dll' || true
           unzip -p "$APK" classes.dex | strings | grep -m1 'Importar Lossless.dll' || true
 
       - name: Upload APK
