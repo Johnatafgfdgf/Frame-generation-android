@@ -49,7 +49,7 @@ target_compile_definitions(zalith_lsfg PRIVATE
   VK_USE_PLATFORM_ANDROID_KHR
 )
 
-target_compile_options(zalith_lsfg PRIVATE -O2 -fvisibility=hidden)
+target_compile_options(zalith_lsfg PRIVATE -O2)
 
 target_link_libraries(zalith_lsfg
   dxbc
