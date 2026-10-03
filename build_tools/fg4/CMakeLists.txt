@@ -15,6 +15,7 @@ if(NOT DEFINED WINFG_SRC)
 endif()
 
 add_subdirectory(${BANNER_CPP}/thirdparty/dxbc ${CMAKE_BINARY_DIR}/dxbc-build)
+target_compile_options(dxbc PRIVATE -include array)
 
 set(LSFG_DIR ${BANNER_CPP}/winlator/lsfg)
 
