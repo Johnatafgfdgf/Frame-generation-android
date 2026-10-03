@@ -1,0 +1,118 @@
+name: Build Zalith FrameGen APK
+
+on:
+  push:
+    branches:
+      - zalith-framegen-build
+    paths:
+      - "build_tools/**"
+      - ".github/workflows/zalith-framegen.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "build_tools/**"
+      - ".github/workflows/zalith-framegen.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout FrameGen build tools
+        uses: actions/checkout@v4
+        with:
+          ref: zalith-framegen-build
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android platform and NDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+          echo "SDKMANAGER=$SDKMANAGER"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;25.2.9519653"
+
+      - name: Fetch LSFG Native sources
+        run: |
+          git clone https://github.com/The412Banner/Bannerlator.git Bannerlator
+          git -C Bannerlator checkout f79ce0971fd7d22d2ace28c8f0ab47da9043a7df
+          git clone https://github.com/The412Banner/win-fg.git win-fg
+          git -C win-fg checkout fbc69ed6c5bf16b824d0a29bd8b171675101f9dd
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git Vulkan-Headers
+          git -C Bannerlator rev-parse HEAD
+          git -C win-fg rev-parse HEAD
+
+      - name: Build LSFG native presenter ARM64
+        run: |
+          NDK="$ANDROID_HOME/ndk/25.2.9519653"
+          cmake -S build_tools/fg4 -B build_tools/fg4-build \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBANNER_CPP="$GITHUB_WORKSPACE/Bannerlator/app/src/main/cpp" \
+            -DWINFG_SRC="$GITHUB_WORKSPACE/win-fg/src" \
+            -DVULKAN_INCLUDE="$GITHUB_WORKSPACE/Vulkan-Headers/include"
+          cmake --build build_tools/fg4-build --config Release --parallel 2
+          file build_tools/fg4-build/libzalith_lsfg.so
+          readelf -d build_tools/fg4-build/libzalith_lsfg.so | grep NEEDED || true
+
+      - name: Clone Zalith Launcher 2.0.3
+        run: |
+          git clone --branch 2.0.3 --depth 1 --recurse-submodules --shallow-submodules             https://github.com/ZalithLauncher/ZalithLauncher2.git ZalithLauncher2
+          git -C ZalithLauncher2 status --short
+          git -C ZalithLauncher2 describe --tags --always
+
+      - name: Apply Frame Generation integration
+        run: |
+          python3 build_tools/apply_zalith_framegen.py
+          python3 build_tools/apply_zalith_framegen_fg2.py
+          python3 build_tools/apply_zalith_framegen_fg4.py
+          cp build_tools/fg4-build/libzalith_lsfg.so ZalithLauncher2/ZalithLauncher/src/main/jniLibs/arm64-v8a/libzalith_lsfg.so
+          mkdir -p ZalithLauncher2/ZalithLauncher/src/main/assets/lsfg-native
+          cp Bannerlator/LICENSE ZalithLauncher2/ZalithLauncher/src/main/assets/lsfg-native/BANNERLATOR_LICENSE
+          cp Bannerlator/THIRD-PARTY-LICENSES.md ZalithLauncher2/ZalithLauncher/src/main/assets/lsfg-native/THIRD-PARTY-LICENSES.md
+          git -C ZalithLauncher2 diff --stat
+          grep -R "settings_tab_frame_generation" -n ZalithLauncher2/ZalithLauncher/src/main | head
+
+      - name: Build ARM64 debug APK
+        working-directory: ZalithLauncher2
+        env:
+          GRADLE_OPTS: -Dorg.gradle.daemon=false
+        run: |
+          chmod +x gradlew
+          ./gradlew --stacktrace ZalithLauncher:assembleDebug -Darch=arm64
+
+      - name: Show APK info
+        run: |
+          find ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug -type f -name "*.apk" -ls
+          sha256sum ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug/*.apk
+          APK="$(find ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug -type f -name '*.apk' | head -n1)"
+          unzip -l "$APK" | grep 'lib/arm64-v8a/libzalith_lsfg.so'
+          unzip -p "$APK" lib/arm64-v8a/libzalith_lsfg.so > /tmp/libzalith_lsfg.so
+          file /tmp/libzalith_lsfg.so
+          readelf -Ws /tmp/libzalith_lsfg.so | grep 'zlsfg_submit_frame'
+          readelf -Ws /tmp/libzalith_lsfg.so | grep 'zlsfg_build_cache'
+          readelf -Ws /tmp/libzalith_lsfg.so | grep 'Java_com_movtery_zalithlauncher_framegen_LsfgNativeBridge_nativeBuildCache'
+          strings /tmp/libzalith_lsfg.so | grep 'LSFG Native from user Lossless.dll' || true
+          unzip -p "$APK" classes.dex | strings | grep -m1 'Importar Lossless.dll' || true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zalith-FrameGen-2.0.3-fg4-lsfg-arm64
+          path: ZalithLauncher2/ZalithLauncher/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7

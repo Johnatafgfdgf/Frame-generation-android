@@ -1,0 +1,215 @@
+typedef int (*zlsfg_submit_frame_fn)(
+    ANativeWindow*, const void*, int, int, int, int, int, int, int, int
+);
+typedef void (*zlsfg_release_surface_fn)(void);
+typedef void (*zlsfg_get_stats_fn)(uint64_t out[4]);
+typedef const char* (*zlsfg_backend_name_fn)(void);
+
+static void *zlsfg_handle = NULL;
+static zlsfg_submit_frame_fn zlsfg_submit_frame_p = NULL;
+static zlsfg_release_surface_fn zlsfg_release_surface_p = NULL;
+static zlsfg_get_stats_fn zlsfg_get_stats_p = NULL;
+static zlsfg_backend_name_fn zlsfg_backend_name_p = NULL;
+
+static uint8_t *lsfg4_render_buffer = NULL;
+static size_t lsfg4_render_capacity = 0;
+static int lsfg4_width = 0;
+static int lsfg4_height = 0;
+static int lsfg4_stride = 0;
+static bool lsfg4_backend_active = false;
+
+static bool lsfg4_env_bool(const char *name, bool fallback) {
+    const char *value = getenv(name);
+    if (value == NULL) return fallback;
+    return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0;
+}
+
+static int lsfg4_env_int(const char *name, int fallback, int minimum, int maximum) {
+    const char *value = getenv(name);
+    if (value == NULL) return fallback;
+    long parsed = strtol(value, NULL, 10);
+    if (parsed < minimum) parsed = minimum;
+    if (parsed > maximum) parsed = maximum;
+    return (int)parsed;
+}
+
+static int lsfg4_perf_preset(void) {
+    const char *profile = getenv("POJAV_FRAMEGEN_PROFILE");
+    if (profile == NULL) return 1;
+    if (strcmp(profile, "quality") == 0) return 0;
+    if (strcmp(profile, "performance") == 0) return 2;
+    return 1;
+}
+
+static bool lsfg4_enabled(void) {
+    return pojav_environ->config_renderer == RENDERER_VK_ZINK &&
+           lsfg4_env_bool("POJAV_FRAMEGEN_ENABLED", false);
+}
+
+static bool lsfg4_load_backend(void) {
+    if (zlsfg_handle != NULL) {
+        return zlsfg_submit_frame_p != NULL &&
+               zlsfg_release_surface_p != NULL &&
+               zlsfg_get_stats_p != NULL;
+    }
+
+    zlsfg_handle = dlopen("libzalith_lsfg.so", RTLD_NOW | RTLD_LOCAL);
+    if (zlsfg_handle == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, "ZalithLSFG",
+                            "dlopen libzalith_lsfg.so failed: %s", dlerror());
+        return false;
+    }
+
+    zlsfg_submit_frame_p = (zlsfg_submit_frame_fn)dlsym(zlsfg_handle, "zlsfg_submit_frame");
+    zlsfg_release_surface_p = (zlsfg_release_surface_fn)dlsym(zlsfg_handle, "zlsfg_release_surface");
+    zlsfg_get_stats_p = (zlsfg_get_stats_fn)dlsym(zlsfg_handle, "zlsfg_get_stats");
+    zlsfg_backend_name_p = (zlsfg_backend_name_fn)dlsym(zlsfg_handle, "zlsfg_backend_name");
+
+    if (!zlsfg_submit_frame_p || !zlsfg_release_surface_p || !zlsfg_get_stats_p) {
+        __android_log_print(ANDROID_LOG_ERROR, "ZalithLSFG",
+                            "LSFG Native symbols missing");
+        return false;
+    }
+
+    __android_log_print(ANDROID_LOG_INFO, "ZalithLSFG", "Loaded backend: %s",
+                        zlsfg_backend_name_p ? zlsfg_backend_name_p() : "LSFG Native");
+    return true;
+}
+
+static void lsfg4_release_backend_surface(void) {
+    if (zlsfg_release_surface_p != NULL) {
+        zlsfg_release_surface_p();
+    }
+    lsfg4_backend_active = false;
+}
+
+static bool lsfg4_prepare_render_buffer(osm_render_window_t *bundle) {
+    if (bundle == NULL || bundle->nativeSurface == NULL) return false;
+
+    int width = ANativeWindow_getWidth(bundle->nativeSurface);
+    int height = ANativeWindow_getHeight(bundle->nativeSurface);
+    if (width <= 0 || height <= 0) return false;
+
+    int stride = width;
+    size_t bytes = (size_t)stride * (size_t)height * 4u;
+    if (bytes > lsfg4_render_capacity) {
+        uint8_t *new_buffer = (uint8_t *)realloc(lsfg4_render_buffer, bytes);
+        if (new_buffer == NULL) return false;
+        lsfg4_render_buffer = new_buffer;
+        lsfg4_render_capacity = bytes;
+    }
+
+    lsfg4_width = width;
+    lsfg4_height = height;
+    lsfg4_stride = stride;
+
+    bundle->buffer.bits = lsfg4_render_buffer;
+    bundle->buffer.width = width;
+    bundle->buffer.height = height;
+    bundle->buffer.stride = stride;
+    bundle->buffer.format = WINDOW_FORMAT_RGBX_8888;
+    return true;
+}
+
+static bool lsfg4_present_fallback(osm_render_window_t *bundle) {
+    if (!bundle || !bundle->nativeSurface || !lsfg4_render_buffer) return false;
+
+    ANativeWindow_Buffer out;
+    if (ANativeWindow_lock(bundle->nativeSurface, &out, NULL) != 0) return false;
+
+    int copy_width = lsfg4_width < out.width ? lsfg4_width : out.width;
+    int copy_height = lsfg4_height < out.height ? lsfg4_height : out.height;
+    for (int y = 0; y < copy_height; ++y) {
+        memcpy(
+            (uint8_t *)out.bits + ((size_t)y * (size_t)out.stride * 4u),
+            lsfg4_render_buffer + ((size_t)y * (size_t)lsfg4_stride * 4u),
+            (size_t)copy_width * 4u
+        );
+    }
+
+    return ANativeWindow_unlockAndPost(bundle->nativeSurface) == 0;
+}
+
+void osm_swap_buffers() {
+    if(currentBundle->state == STATE_RENDERER_NEW_WINDOW) {
+        if (lsfg4_backend_active) lsfg4_release_backend_surface();
+        osm_swap_surfaces(currentBundle);
+        currentBundle->state = STATE_RENDERER_ALIVE;
+    }
+
+    if (!lsfg4_enabled()) {
+        if (lsfg4_backend_active) lsfg4_release_backend_surface();
+
+        if(currentBundle->nativeSurface != NULL && !currentBundle->disable_rendering)
+            if(ANativeWindow_lock(currentBundle->nativeSurface, &currentBundle->buffer, NULL) != 0)
+                osm_release_window();
+
+        osm_apply_current_ll();
+        glFinish_p();
+
+        if(currentBundle->nativeSurface != NULL && !currentBundle->disable_rendering)
+            if(ANativeWindow_unlockAndPost(currentBundle->nativeSurface) != 0)
+                osm_release_window();
+        return;
+    }
+
+    if (!lsfg4_prepare_render_buffer(currentBundle)) {
+        return;
+    }
+
+    osm_apply_current_ll();
+    glFinish_p();
+
+    bool submitted = false;
+    if (lsfg4_load_backend()) {
+        int multiplier = lsfg4_env_int("POJAV_FRAMEGEN_MULTIPLIER", 2, 2, 4);
+        int target_fps = lsfg4_env_int("POJAV_FRAMEGEN_TARGET_FPS", 60, 30, 120);
+        int low_latency = lsfg4_env_bool("POJAV_FRAMEGEN_LOW_LATENCY", true) ? 1 : 0;
+        int scene_protection = lsfg4_env_bool("POJAV_FRAMEGEN_SCENE_PROTECTION", true) ? 1 : 0;
+
+        submitted = zlsfg_submit_frame_p(
+            currentBundle->nativeSurface,
+            lsfg4_render_buffer,
+            lsfg4_width,
+            lsfg4_height,
+            lsfg4_stride,
+            multiplier,
+            lsfg4_perf_preset(),
+            target_fps,
+            low_latency,
+            scene_protection
+        ) != 0;
+    }
+
+    if (submitted) {
+        lsfg4_backend_active = true;
+        return;
+    }
+
+    if (lsfg4_backend_active) lsfg4_release_backend_surface();
+
+    // Safe fallback: never leave the user with a black screen if LSFG init fails.
+    if (!lsfg4_present_fallback(currentBundle)) {
+        osm_release_window();
+    }
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_com_movtery_zalithlauncher_bridge_ZLBridge_getFrameGenStats(JNIEnv *env, jclass clazz) {
+    uint64_t values64[4] = {0, 0, 0, 0};
+    if (lsfg4_load_backend() && zlsfg_get_stats_p) {
+        zlsfg_get_stats_p(values64);
+    }
+
+    jlong values[4] = {
+        (jlong)values64[0],
+        (jlong)values64[1],
+        (jlong)values64[2],
+        (jlong)values64[3]
+    };
+    jlongArray result = (*env)->NewLongArray(env, 4);
+    if (result != NULL) {
+        (*env)->SetLongArrayRegion(env, result, 0, 4, values);
+    }
+    return result;
+}
