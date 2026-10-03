@@ -667,19 +667,30 @@ private:
             extent.height = std::clamp(static_cast<uint32_t>(h), caps.minImageExtent.height, caps.maxImageExtent.height);
         }
 
+        // Frame generation must preserve every queued intermediate frame.
+        // MAILBOX is latest-wins and can discard generated presents before the
+        // panel ever shows them. FIFO is guaranteed by Vulkan and queues them in
+        // order on consecutive display opportunities.
         uint32_t modeCount = 0;
         pGetSurfaceModes_(physical_, surface_, &modeCount, nullptr);
         std::vector<VkPresentModeKHR> modes(modeCount);
         if (modeCount) pGetSurfaceModes_(physical_, surface_, &modeCount, modes.data());
         VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
+        bool fifoAvailable = modeCount == 0;
         for (auto m : modes) {
-            if (m == VK_PRESENT_MODE_MAILBOX_KHR) {
-                mode = m;
+            if (m == VK_PRESENT_MODE_FIFO_KHR) {
+                fifoAvailable = true;
                 break;
             }
         }
+        if (!fifoAvailable) {
+            ZFG_LOGE("FIFO present mode unexpectedly unavailable");
+            return false;
+        }
 
-        uint32_t minCount = std::max(caps.minImageCount, 3u);
+        // 4x can have three generated frames plus the real frame queued. Give
+        // the presentation engine one spare where the surface allows it.
+        uint32_t minCount = std::max(caps.minImageCount, 5u);
         if (caps.maxImageCount && minCount > caps.maxImageCount) minCount = caps.maxImageCount;
 
         VkSwapchainCreateInfoKHR sci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
@@ -1096,8 +1107,13 @@ private:
             auto started = std::chrono::steady_clock::now();
             if (!synthesizeAndPresent(static_cast<int>(g), static_cast<int>(genCount), w, h))
                 return false;
-            auto spent = std::chrono::steady_clock::now() - started;
-            if (spent < interval) std::this_thread::sleep_for(interval - spent);
+
+            // FIFO already preserves/paces every present. When the user turns
+            // Low Latency off, allow a conservative CPU-side spacing as well.
+            if (!cfg.lowLatency) {
+                auto spent = std::chrono::steady_clock::now() - started;
+                if (spent < interval) std::this_thread::sleep_for(interval - spent);
+            }
         }
 
         if (!presentImage(curr, false, w, h)) return false;
